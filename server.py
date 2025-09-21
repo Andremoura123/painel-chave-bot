@@ -9,7 +9,7 @@ app = Flask(__name__)
 def init_db():
     conn = sqlite3.connect('keys.db')
     cursor = conn.cursor()
-    # Tabela atualizada com a coluna 'client_name'
+    # A estrutura da tabela permanece a mesma
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS license_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,7 +23,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- Endpoint da API para o Bot Validar a Chave (NÃO PRECISA DE MUDANÇAS) ---
+# --- Endpoint da API para o Bot Validar a Chave (sem mudanças) ---
 @app.route('/validate_key', methods=['POST'])
 def validate_key():
     data = request.json
@@ -67,31 +67,39 @@ def admin_panel():
     conn = sqlite3.connect('keys.db')
     cursor = conn.cursor()
 
-    # Ação para gerar uma nova chave
-    if request.method == 'POST' and 'generate_key' in request.form:
-        client_name = request.form.get('client_name', 'Sem Nome') # Pega o nome do formulário
-        new_key = str(uuid.uuid4())
-        creation_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute(
-            "INSERT INTO license_keys (key, client_name, creation_date) VALUES (?, ?, ?)",
-            (new_key, client_name, creation_date)
-        )
-        conn.commit()
+    if request.method == 'POST':
+        # Ação para gerar uma nova chave
+        if 'generate_key' in request.form:
+            client_name = request.form.get('client_name', 'Sem Nome')
+            new_key = str(uuid.uuid4())
+            creation_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute(
+                "INSERT INTO license_keys (key, client_name, creation_date) VALUES (?, ?, ?)",
+                (new_key, client_name, creation_date)
+            )
+            conn.commit()
 
-    # Ação para desativar/reativar uma chave
-    if request.method == 'POST' and 'toggle_key' in request.form:
-        key_id = request.form.get('key_id')
-        cursor.execute("SELECT is_active FROM license_keys WHERE id = ?", (key_id,))
-        current_status = cursor.fetchone()[0]
-        new_status = 0 if current_status == 1 else 1
-        cursor.execute("UPDATE license_keys SET is_active = ? WHERE id = ?", (new_status, key_id))
-        conn.commit()
+        # Ação para desativar/reativar uma chave
+        elif 'toggle_key' in request.form:
+            key_id = request.form.get('key_id')
+            cursor.execute("SELECT is_active FROM license_keys WHERE id = ?", (key_id,))
+            current_status = cursor.fetchone()[0]
+            new_status = 0 if current_status == 1 else 1
+            cursor.execute("UPDATE license_keys SET is_active = ? WHERE id = ?", (new_status, key_id))
+            conn.commit()
+        
+        # <<< NOVO: Ação para deletar uma chave inativa >>>
+        elif 'delete_key' in request.form:
+            key_id = request.form.get('key_id')
+            # Adicionamos 'AND is_active = 0' como uma segurança extra
+            cursor.execute("DELETE FROM license_keys WHERE id = ? AND is_active = 0", (key_id,))
+            conn.commit()
     
     cursor.execute("SELECT id, key, client_name, discord_server_id, creation_date, is_active FROM license_keys ORDER BY id DESC")
     keys = cursor.fetchall()
     conn.close()
 
-    # HTML atualizado com o campo de nome
+    # HTML atualizado com o botão de deletar
     return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -103,11 +111,13 @@ def admin_panel():
                 table { width: 100%; border-collapse: collapse; margin-top: 1em;}
                 th, td { padding: 8px; border: 1px solid #444; text-align: left; }
                 th { background-color: #7289da; }
-                button, input { background-color: #7289da; color: white; padding: 10px; border: none; cursor: pointer; border-radius: 3px; }
+                button, input { background-color: #7289da; color: white; padding: 10px; border: none; cursor: pointer; border-radius: 3px; margin-right: 5px; }
                 input[type=text] { background-color: #40444b; border: 1px solid #222; }
                 form { margin-bottom: 1.5em; }
                 .active { color: lightgreen; }
                 .inactive { color: red; }
+                .delete-btn { background-color: #f04747; } /* Cor vermelha para o botão deletar */
+                .action-forms { display: flex; align-items: center; } /* Para alinhar os botões */
             </style>
         </head>
         <body>
@@ -120,17 +130,26 @@ def admin_panel():
             <h2>Chaves Vendidas</h2>
             <table>
                 <tr>
-                    <th>ID</th><th>Nome do Cliente</th><th>Chave</th><th>ID do Servidor</th><th>Data</th><th>Status</th><th>Ação</th>
+                    <th>ID</th><th>Nome do Cliente</th><th>Chave</th><th>ID do Servidor</th><th>Data</th><th>Status</th><th>Ações</th>
                 </tr>
                 {% for k in keys %}
                 <tr>
                     <td>{{ k[0] }}</td><td>{{ k[2] }}</td><td>{{ k[1] }}</td><td>{{ k[3] or 'Ainda não usado' }}</td><td>{{ k[4] }}</td>
                     <td class="{{ 'active' if k[5] else 'inactive' }}">{{ 'Ativa' if k[5] else 'Inativa' }}</td>
                     <td>
-                        <form method="post" style="margin:0;">
-                            <input type="hidden" name="key_id" value="{{ k[0] }}">
-                            <button name="toggle_key" type="submit">{{ 'Desativar' if k[5] else 'Reativar' }}</button>
-                        </form>
+                        <div class="action-forms">
+                            <form method="post" style="margin:0;">
+                                <input type="hidden" name="key_id" value="{{ k[0] }}">
+                                <button name="toggle_key" type="submit">{{ 'Desativar' if k[5] else 'Reativar' }}</button>
+                            </form>
+                            
+                            {% if not k[5] %}
+                            <form method="post" style="margin:0;" onsubmit="return confirm('Você tem certeza que quer deletar esta chave permanentemente?');">
+                                <input type="hidden" name="key_id" value="{{ k[0] }}">
+                                <button name="delete_key" type="submit" class="delete-btn">Deletar</button>
+                            </form>
+                            {% endif %}
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}
