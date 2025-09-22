@@ -45,41 +45,50 @@ def init_db():
         ''')
         db.commit()
 
-# --- Endpoint da API para o Bot Validar a Chave (CORRIGIDO) ---
+# Substitua a sua função validate_key por esta
 @app.route('/validate_key', methods=['POST'])
 def validate_key():
+    print("\n--- Endpoint /validate_key foi chamado! ---") # LOG 1
+    
     data = request.json
     key = data.get('key')
     server_id = data.get('server_id')
 
+    print(f"Dados recebidos do bot: key='{key}', server_id='{server_id}'") # LOG 2
+
     if not key or not server_id:
+        print("ERRO: Chave ou ID do servidor ausente no request.")
         return jsonify({'status': 'error', 'message': 'Chave ou ID do servidor ausente.'}), 400
 
     db = get_db()
     cursor = db.cursor()
-    # Nomes da tabela corrigidos para "license_keys"
     cursor.execute("SELECT discord_server_id, is_active FROM license_keys WHERE key = ?", (key,))
     result = cursor.fetchone()
 
     if not result:
+        print(f"ERRO: A chave '{key}' não foi encontrada no banco de dados.")
         return jsonify({'status': 'error', 'message': 'Chave inválida.'}), 403
 
-    # Acesso por nome da coluna (funciona por causa do row_factory)
     db_server_id = result['discord_server_id']
     is_active = result['is_active']
+    print(f"Dados do DB para a chave '{key}': db_server_id='{db_server_id}', is_active={is_active}") # LOG 3
 
     if not is_active:
+        print(f"ERRO: A chave '{key}' está inativa.")
         return jsonify({'status': 'error', 'message': 'Esta chave foi desativada.'}), 403
 
     if db_server_id is None:
-        # Nomes da tabela corrigidos para "license_keys"
+        print(f"A chave '{key}' é nova. Tentando vincular ao server_id '{server_id}'...") # LOG 4
         cursor.execute("UPDATE license_keys SET discord_server_id = ? WHERE key = ?", (server_id, key))
         db.commit()
+        print("SUCESSO: Banco de dados atualizado!")
         return jsonify({'status': 'success', 'message': 'Chave validada e vinculada a este servidor.'})
 
     if db_server_id == server_id:
+        print(f"A chave '{key}' já está vinculada a este servidor. Re-validando...")
         return jsonify({'status': 'success', 'message': 'Chave re-validada para este servidor.'})
     else:
+        print(f"ERRO: A chave '{key}' já está em uso no servidor '{db_server_id}'.")
         return jsonify({'status': 'error', 'message': 'Esta chave já está em uso em outro servidor.'}), 403
 
 # --- Painel de Gerenciamento Web (CORRIGIDO) ---
