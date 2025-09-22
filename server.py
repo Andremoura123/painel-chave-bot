@@ -1,29 +1,51 @@
-from flask import Flask, request, jsonify, render_template_string
+# server.py
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, g
 import sqlite3
 import uuid
 from datetime import datetime
 
 app = Flask(__name__)
+DATABASE = 'keys.db'
 
-# --- Configuração do Banco de Dados ---
+# --- Gerenciamento da Conexão com o Banco de Dados (Padrão Flask) ---
+
+def get_db():
+    """
+    Abre uma nova conexão com o banco de dados se não houver uma no contexto da requisição atual.
+    """
+    if 'db' not in g:
+        g.db = sqlite3.connect(DATABASE)
+        # PONTO CRÍTICO: Permite que os resultados do DB sejam acessados como dicionários.
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+@app.teardown_appcontext
+def close_db(exception):
+    """
+    Fecha a conexão com o banco de dados automaticamente ao final da requisição.
+    """
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
 def init_db():
-    conn = sqlite3.connect('keys.db')
-    cursor = conn.cursor()
-    # A estrutura da tabela permanece a mesma
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS license_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT NOT NULL UNIQUE,
-            client_name TEXT, 
-            discord_server_id TEXT,
-            creation_date TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """Inicializa o banco de dados e cria a tabela se ela não existir."""
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS license_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                client_name TEXT,
+                discord_server_id TEXT,
+                creation_date TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+        ''')
+        db.commit()
 
-# --- Endpoint da API para o Bot Validar a Chave (sem mudanças) ---
+# --- Endpoint da API para o Bot Validar a Chave (CORRIGIDO) ---
 @app.route('/validate_key', methods=['POST'])
 def validate_key():
     data = request.json
@@ -33,42 +55,40 @@ def validate_key():
     if not key or not server_id:
         return jsonify({'status': 'error', 'message': 'Chave ou ID do servidor ausente.'}), 400
 
-    conn = sqlite3.connect('keys.db')
-    cursor = conn.cursor()
+    db = get_db()
+    cursor = db.cursor()
+    # Nomes da tabela corrigidos para "license_keys"
     cursor.execute("SELECT discord_server_id, is_active FROM license_keys WHERE key = ?", (key,))
     result = cursor.fetchone()
 
     if not result:
-        conn.close()
         return jsonify({'status': 'error', 'message': 'Chave inválida.'}), 403
 
-    db_server_id, is_active = result
+    # Acesso por nome da coluna (funciona por causa do row_factory)
+    db_server_id = result['discord_server_id']
+    is_active = result['is_active']
 
     if not is_active:
-        conn.close()
         return jsonify({'status': 'error', 'message': 'Esta chave foi desativada.'}), 403
 
     if db_server_id is None:
+        # Nomes da tabela corrigidos para "license_keys"
         cursor.execute("UPDATE license_keys SET discord_server_id = ? WHERE key = ?", (server_id, key))
-        conn.commit()
-        conn.close()
+        db.commit()
         return jsonify({'status': 'success', 'message': 'Chave validada e vinculada a este servidor.'})
 
     if db_server_id == server_id:
-        conn.close()
         return jsonify({'status': 'success', 'message': 'Chave re-validada para este servidor.'})
     else:
-        conn.close()
         return jsonify({'status': 'error', 'message': 'Esta chave já está em uso em outro servidor.'}), 403
 
-# --- Painel de Gerenciamento Web (Atualizado) ---
+# --- Painel de Gerenciamento Web (CORRIGIDO) ---
 @app.route('/admin', methods=['GET', 'POST'])
 def admin_panel():
-    conn = sqlite3.connect('keys.db')
-    cursor = conn.cursor()
+    db = get_db()
+    cursor = db.cursor()
 
     if request.method == 'POST':
-        # Ação para gerar uma nova chave
         if 'generate_key' in request.form:
             client_name = request.form.get('client_name', 'Sem Nome')
             new_key = str(uuid.uuid4())
@@ -77,29 +97,22 @@ def admin_panel():
                 "INSERT INTO license_keys (key, client_name, creation_date) VALUES (?, ?, ?)",
                 (new_key, client_name, creation_date)
             )
-            conn.commit()
-
-        # Ação para desativar/reativar uma chave
         elif 'toggle_key' in request.form:
             key_id = request.form.get('key_id')
             cursor.execute("SELECT is_active FROM license_keys WHERE id = ?", (key_id,))
-            current_status = cursor.fetchone()[0]
+            current_status = cursor.fetchone()['is_active']
             new_status = 0 if current_status == 1 else 1
             cursor.execute("UPDATE license_keys SET is_active = ? WHERE id = ?", (new_status, key_id))
-            conn.commit()
-        
-        # <<< NOVO: Ação para deletar uma chave inativa >>>
         elif 'delete_key' in request.form:
             key_id = request.form.get('key_id')
-            # Adicionamos 'AND is_active = 0' como uma segurança extra
             cursor.execute("DELETE FROM license_keys WHERE id = ? AND is_active = 0", (key_id,))
-            conn.commit()
+        
+        db.commit()
+        return redirect(url_for('admin_panel'))
     
     cursor.execute("SELECT id, key, client_name, discord_server_id, creation_date, is_active FROM license_keys ORDER BY id DESC")
     keys = cursor.fetchall()
-    conn.close()
 
-    # HTML atualizado com o botão de deletar
     return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -116,8 +129,8 @@ def admin_panel():
                 form { margin-bottom: 1.5em; }
                 .active { color: lightgreen; }
                 .inactive { color: red; }
-                .delete-btn { background-color: #f04747; } /* Cor vermelha para o botão deletar */
-                .action-forms { display: flex; align-items: center; } /* Para alinhar os botões */
+                .delete-btn { background-color: #f04747; }
+                .action-forms { display: flex; align-items: center; }
             </style>
         </head>
         <body>
@@ -134,18 +147,17 @@ def admin_panel():
                 </tr>
                 {% for k in keys %}
                 <tr>
-                    <td>{{ k[0] }}</td><td>{{ k[2] }}</td><td>{{ k[1] }}</td><td>{{ k[3] or 'Ainda não usado' }}</td><td>{{ k[4] }}</td>
-                    <td class="{{ 'active' if k[5] else 'inactive' }}">{{ 'Ativa' if k[5] else 'Inativa' }}</td>
+                    <td>{{ k['id'] }}</td><td>{{ k['client_name'] }}</td><td>{{ k['key'] }}</td><td>{{ k['discord_server_id'] or 'Ainda não usado' }}</td><td>{{ k['creation_date'] }}</td>
+                    <td class="{{ 'active' if k['is_active'] else 'inactive' }}">{{ 'Ativa' if k['is_active'] else 'Inativa' }}</td>
                     <td>
                         <div class="action-forms">
                             <form method="post" style="margin:0;">
-                                <input type="hidden" name="key_id" value="{{ k[0] }}">
-                                <button name="toggle_key" type="submit">{{ 'Desativar' if k[5] else 'Reativar' }}</button>
+                                <input type="hidden" name="key_id" value="{{ k['id'] }}">
+                                <button name="toggle_key" type="submit">{{ 'Desativar' if k['is_active'] else 'Reativar' }}</button>
                             </form>
-                            
-                            {% if not k[5] %}
+                            {% if not k['is_active'] %}
                             <form method="post" style="margin:0;" onsubmit="return confirm('Você tem certeza que quer deletar esta chave permanentemente?');">
-                                <input type="hidden" name="key_id" value="{{ k[0] }}">
+                                <input type="hidden" name="key_id" value="{{ k['id'] }}">
                                 <button name="delete_key" type="submit" class="delete-btn">Deletar</button>
                             </form>
                             {% endif %}
@@ -160,4 +172,6 @@ def admin_panel():
 
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Para produção, considere usar um servidor WSGI como Gunicorn.
+    # Ex: gunicorn --bind 0.0.0.0:5000 server:app
+    app.run(debug=False, host='0.0.0.0', port=5000)
